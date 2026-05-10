@@ -59,6 +59,18 @@ defmodule SymphonyElixir.Claude.AppServer do
   @spec stop_session(session()) :: :ok
   def stop_session(_session), do: :ok
 
+  @doc false
+  @spec stream_event_from_line(String.t()) :: {atom(), map()}
+  def stream_event_from_line(line) when is_binary(line) do
+    case Jason.decode(line) do
+      {:ok, payload} when is_map(payload) ->
+        {event_atom(payload), %{payload: payload, raw: maybe_truncate(line)}}
+
+      _ ->
+        {:stream_text, %{raw: maybe_truncate(line)}}
+    end
+  end
+
   @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run_turn(
         %{workspace: workspace, metadata: metadata, thread_id: thread_id},
@@ -179,23 +191,24 @@ defmodule SymphonyElixir.Claude.AppServer do
   end
 
   defp emit_event_from_line(on_message, metadata, line) do
-    case Jason.decode(line) do
-      {:ok, payload} when is_map(payload) ->
-        event = event_atom(payload)
-
-        emit_message(
-          on_message,
-          event,
-          %{payload: payload, raw: maybe_truncate(line)},
-          metadata
-        )
-
-      _ ->
-        emit_message(on_message, :stream_text, %{raw: maybe_truncate(line)}, metadata)
-    end
+    {event, details} = stream_event_from_line(line)
+    emit_message(on_message, event, details, metadata)
   end
 
-  defp event_atom(%{"type" => type}) when is_binary(type), do: String.to_atom("claude_#{type}")
+  defp event_atom(%{"type" => "assistant"}), do: :claude_assistant
+  defp event_atom(%{"type" => "content_block_delta"}), do: :claude_content_block_delta
+  defp event_atom(%{"type" => "content_block_start"}), do: :claude_content_block_start
+  defp event_atom(%{"type" => "content_block_stop"}), do: :claude_content_block_stop
+  defp event_atom(%{"type" => "error"}), do: :claude_error
+  defp event_atom(%{"type" => "message_delta"}), do: :claude_message_delta
+  defp event_atom(%{"type" => "message_start"}), do: :claude_message_start
+  defp event_atom(%{"type" => "message_stop"}), do: :claude_message_stop
+  defp event_atom(%{"type" => "result"}), do: :claude_result
+  defp event_atom(%{"type" => "system"}), do: :claude_system
+  defp event_atom(%{"type" => "tool_result"}), do: :claude_tool_result
+  defp event_atom(%{"type" => "tool_use"}), do: :claude_tool_use
+  defp event_atom(%{"type" => "user"}), do: :claude_user
+  defp event_atom(%{"type" => type}) when is_binary(type), do: :claude_event
   defp event_atom(_), do: :claude_event
 
   defp emit_message(on_message, event, details, metadata) when is_function(on_message, 1) do
@@ -240,10 +253,8 @@ defmodule SymphonyElixir.Claude.AppServer do
   defp maybe_truncate(other), do: inspect(other)
 
   defp safely_close(port) when is_port(port) do
-    try do
-      Port.close(port)
-    rescue
-      _ -> :ok
-    end
+    Port.close(port)
+  rescue
+    _ -> :ok
   end
 end
