@@ -4,7 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Lifecycle, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   # Symphony's reference implementation was Codex-only. The Armada fork adds
   # `agent.type` to the workflow config; AgentRunner now dispatches to the
@@ -55,8 +55,12 @@ defmodule SymphonyElixir.AgentRunner do
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+          state_updater = Keyword.get(opts, :state_updater, &Tracker.update_issue_state/2)
+
+          with {:ok, active_issue, lifecycle} <- Lifecycle.begin_work(issue, state_updater),
+               :ok <- Workspace.run_before_run_hook(workspace, active_issue, worker_host) do
+            opts = Keyword.put(opts, :lifecycle, lifecycle)
+            run_codex_turns(workspace, active_issue, codex_update_recipient, opts, worker_host)
           end
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
@@ -139,7 +143,9 @@ defmodule SymphonyElixir.AgentRunner do
           "workspace=#{context.workspace} turn=#{turn_number}/#{max_turns}"
       )
 
-      case continue_with_issue?(issue, context.issue_state_fetcher) do
+      lifecycle = Keyword.get(opts, :lifecycle)
+
+      case continue_with_issue?(issue, context.issue_state_fetcher, lifecycle) do
         {:continue, refreshed_issue} when turn_number < max_turns ->
           Logger.info(
             "Continuing agent run for #{issue_context(refreshed_issue)} after normal turn " <>
@@ -179,10 +185,11 @@ defmodule SymphonyElixir.AgentRunner do
     """
   end
 
-  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
+  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher, lifecycle)
+       when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if active_issue_state?(refreshed_issue.state) do
+        if continue_same_lifecycle_role?(lifecycle, refreshed_issue) do
           {:continue, refreshed_issue}
         else
           {:done, refreshed_issue}
@@ -196,7 +203,13 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
+  defp continue_with_issue?(issue, _issue_state_fetcher, _lifecycle), do: {:done, issue}
+
+  defp continue_same_lifecycle_role?(%Lifecycle{} = lifecycle, %Issue{} = issue) do
+    Lifecycle.continue_same_role?(lifecycle, issue)
+  end
+
+  defp continue_same_lifecycle_role?(_lifecycle, %Issue{} = issue), do: active_issue_state?(issue.state)
 
   defp active_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = normalize_issue_state(state_name)

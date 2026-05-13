@@ -204,8 +204,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         hook_after_create: "echo nope && exit 17"
       )
 
+      failed_workspace = Path.join(workspace_root, "MT-FAIL")
+
       assert {:error, {:workspace_hook_failed, "after_create", 17, _output}} =
                Workspace.create_for_issue("MT-FAIL")
+
+      refute File.exists?(failed_workspace)
     after
       File.rm_rf(workspace_root)
     end
@@ -225,8 +229,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         hook_after_create: "sleep 1"
       )
 
+      timed_out_workspace = Path.join(workspace_root, "MT-TIMEOUT")
+
       assert {:error, {:workspace_hook_timeout, "after_create", 10}} =
                Workspace.create_for_issue("MT-TIMEOUT")
+
+      refute File.exists?(timed_out_workspace)
     after
       File.rm_rf(workspace_root)
     end

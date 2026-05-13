@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Workspace do
   alias SymphonyElixir.{Config, PathSafety, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
+  @ready_marker ".symphony-workspace-ready"
 
   @type worker_host :: String.t() | nil
 
@@ -33,7 +34,7 @@ defmodule SymphonyElixir.Workspace do
 
   defp ensure_workspace(workspace, nil) do
     cond do
-      File.dir?(workspace) ->
+      File.dir?(workspace) and reusable_workspace?(workspace) ->
         {:ok, workspace, false}
 
       File.exists?(workspace) ->
@@ -212,17 +213,74 @@ defmodule SymphonyElixir.Workspace do
 
     case created? do
       true ->
-        case hooks.after_create do
-          nil ->
-            :ok
-
-          command ->
-            run_hook(command, workspace, issue_context, "after_create", worker_host)
-        end
+        maybe_bootstrap_workspace(workspace, issue_context, hooks.after_create, worker_host)
 
       false ->
         :ok
     end
+  end
+
+  defp maybe_bootstrap_workspace(_workspace, _issue_context, nil, _worker_host), do: :ok
+
+  defp maybe_bootstrap_workspace(workspace, issue_context, command, worker_host) do
+    case run_hook(command, workspace, issue_context, "after_create", worker_host) do
+      :ok ->
+        mark_workspace_ready(workspace, worker_host)
+
+      {:error, reason} = error ->
+        cleanup_failed_workspace(workspace, worker_host)
+
+        Logger.warning(
+          "Removed failed workspace after after_create error #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)} reason=#{inspect(reason)}"
+        )
+
+        error
+    end
+  end
+
+  defp reusable_workspace?(workspace) do
+    case Config.settings!().hooks.after_create do
+      nil -> true
+      _command -> File.exists?(Path.join(workspace, @ready_marker))
+    end
+  end
+
+  defp mark_workspace_ready(workspace, nil) do
+    File.write!(Path.join(workspace, @ready_marker), DateTime.utc_now() |> DateTime.to_iso8601())
+    :ok
+  end
+
+  defp mark_workspace_ready(workspace, worker_host) when is_binary(worker_host) do
+    script =
+      [
+        remote_shell_assign("workspace", workspace),
+        "cd \"$workspace\"",
+        "date -u +%Y-%m-%dT%H:%M:%SZ > #{@ready_marker}"
+      ]
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
+      {:ok, {_output, 0}} -> :ok
+      {:ok, {output, status}} -> {:error, {:workspace_ready_marker_failed, worker_host, status, output}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp cleanup_failed_workspace(workspace, nil) do
+    File.rm_rf(workspace)
+    :ok
+  end
+
+  defp cleanup_failed_workspace(workspace, worker_host) when is_binary(worker_host) do
+    script =
+      [
+        remote_shell_assign("workspace", workspace),
+        "rm -rf \"$workspace\""
+      ]
+      |> Enum.join("\n")
+
+    run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms)
+    :ok
   end
 
   defp maybe_run_before_remove_hook(workspace, nil) do
