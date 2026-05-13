@@ -117,7 +117,7 @@ defmodule SymphonyElixir.Linear.Client do
 
       true ->
         with {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_by_states(project_slug, tracker.active_states, assignee_filter)
+          do_fetch_by_states(project_slug, tracker.active_states, assignee_filter, tracker)
         end
     end
   end
@@ -140,7 +140,7 @@ defmodule SymphonyElixir.Linear.Client do
           {:error, :missing_linear_project_slug}
 
         true ->
-          do_fetch_by_states(project_slug, normalized_states, nil)
+          do_fetch_by_states(project_slug, normalized_states, nil, tracker)
       end
     end
   end
@@ -221,6 +221,10 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   @doc false
+  @spec filter_by_tracker_labels_for_test([Issue.t()], map()) :: [Issue.t()]
+  def filter_by_tracker_labels_for_test(issues, tracker), do: filter_by_tracker_labels(issues, tracker)
+
+  @doc false
   @spec fetch_issue_states_by_ids_for_test([String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun)
@@ -236,11 +240,11 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
-    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [])
+  defp do_fetch_by_states(project_slug, state_names, assignee_filter, tracker) do
+    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [], tracker)
   end
 
-  defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, after_cursor, acc_issues) do
+  defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, after_cursor, acc_issues, tracker) do
     with {:ok, body} <-
            graphql(@query, %{
              projectSlug: project_slug,
@@ -254,10 +258,10 @@ defmodule SymphonyElixir.Linear.Client do
 
       case next_page_cursor(page_info) do
         {:ok, next_cursor} ->
-          do_fetch_by_states_page(project_slug, state_names, assignee_filter, next_cursor, updated_acc)
+          do_fetch_by_states_page(project_slug, state_names, assignee_filter, next_cursor, updated_acc, tracker)
 
         :done ->
-          {:ok, finalize_paginated_issues(updated_acc)}
+          {:ok, updated_acc |> finalize_paginated_issues() |> filter_by_tracker_labels(tracker)}
 
         {:error, reason} ->
           {:error, reason}
@@ -270,6 +274,28 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp finalize_paginated_issues(acc_issues) when is_list(acc_issues), do: Enum.reverse(acc_issues)
+
+  defp filter_by_tracker_labels(issues, %{required_labels: required, excluded_labels: excluded}) do
+    required = normalize_labels(required)
+    excluded = normalize_labels(excluded)
+
+    Enum.filter(issues, fn %Issue{labels: labels} ->
+      issue_labels = labels |> normalize_labels() |> MapSet.new()
+
+      Enum.all?(required, &MapSet.member?(issue_labels, &1)) and
+        not Enum.any?(excluded, &MapSet.member?(issue_labels, &1))
+    end)
+  end
+
+  defp filter_by_tracker_labels(issues, _tracker), do: issues
+
+  defp normalize_labels(labels) when is_list(labels) do
+    labels
+    |> Enum.map(&to_string/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.map(&String.downcase/1)
+    |> Enum.reject(&(&1 == ""))
+  end
 
   defp do_fetch_issue_states(ids, assignee_filter) do
     do_fetch_issue_states(ids, assignee_filter, &graphql/2)

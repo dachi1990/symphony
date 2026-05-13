@@ -315,6 +315,20 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute issue.assigned_to_worker
   end
 
+  test "linear client filters source-routed issues by workflow labels" do
+    landing = %Issue{id: "issue-landing", identifier: "MT-1", labels: ["source-landing", "agent-only"]}
+    app = %Issue{id: "issue-app", identifier: "MT-2", labels: ["source-app", "agent-only"]}
+    blocked = %Issue{id: "issue-blocked", identifier: "MT-3", labels: ["source-landing", "do-not-run"]}
+
+    filtered =
+      Client.filter_by_tracker_labels_for_test([landing, app, blocked], %{
+        required_labels: ["source-landing"],
+        excluded_labels: ["do-not-run"]
+      })
+
+    assert filtered == [landing]
+  end
+
   test "linear client normalizes blockers from inverse relations" do
     raw_issue = %{
       "id" => "issue-1",
