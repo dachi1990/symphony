@@ -282,6 +282,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert :ok = Workspace.remove_issue_workspaces("S_1")
       refute File.exists?(target_workspace)
       assert File.exists?(untouched_workspace)
+      assert [archived_workspace] = Path.wildcard(Path.join([workspace_root, ".archive", "S_1-*"]))
+      assert File.read!(Path.join(archived_workspace, "marker.txt")) == "stale"
     after
       File.rm_rf(workspace_root)
     end
@@ -649,6 +651,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert :ok = Workspace.remove_issue_workspaces("MT-HOOKS")
       assert File.read!(before_remove_marker) == "before_remove\n"
       refute File.exists?(workspace)
+      assert [_archived_workspace] = Path.wildcard(Path.join([workspace_root, ".archive", "MT-HOOKS-*"]))
     after
       File.rm_rf(test_root)
     end
@@ -674,6 +677,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert {:ok, workspace} = Workspace.create_for_issue("MT-HOOKS-FAIL")
       assert :ok = Workspace.remove_issue_workspaces("MT-HOOKS-FAIL")
       refute File.exists?(workspace)
+      assert [_archived_workspace] = Path.wildcard(Path.join([workspace_root, ".archive", "MT-HOOKS-FAIL-*"]))
     after
       File.rm_rf(test_root)
     end

@@ -95,7 +95,7 @@ defmodule SymphonyElixir.Workspace do
         case validate_workspace_path(workspace, nil) do
           :ok ->
             maybe_run_before_remove_hook(workspace, nil)
-            File.rm_rf(workspace)
+            archive_workspace(workspace, nil)
 
           {:error, reason} ->
             {:error, reason, ""}
@@ -112,7 +112,10 @@ defmodule SymphonyElixir.Workspace do
     script =
       [
         remote_shell_assign("workspace", workspace),
-        "rm -rf \"$workspace\""
+        remote_shell_assign("archive_root", archive_root()),
+        "archive_leaf=\"$(basename \"$workspace\")-$(date -u +%Y%m%dT%H%M%SZ)\"",
+        "mkdir -p \"$archive_root\"",
+        "if [ -e \"$workspace\" ]; then mv \"$workspace\" \"$archive_root/$archive_leaf\"; fi"
       ]
       |> Enum.join("\n")
 
@@ -281,6 +284,41 @@ defmodule SymphonyElixir.Workspace do
 
     run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms)
     :ok
+  end
+
+  defp archive_workspace(workspace, nil) do
+    archive_root = archive_root()
+    File.mkdir_p!(archive_root)
+    destination = unique_archive_path(archive_root, Path.basename(workspace))
+
+    case File.rename(workspace, destination) do
+      :ok ->
+        Logger.info("Archived workspace workspace=#{workspace} archive_path=#{destination}")
+        {:ok, [destination]}
+
+      {:error, _reason} ->
+        with {:ok, _copied} <- File.cp_r(workspace, destination),
+             {:ok, _removed} <- File.rm_rf(workspace) do
+          Logger.info("Archived workspace by copy workspace=#{workspace} archive_path=#{destination}")
+          {:ok, [destination]}
+        else
+          {:error, reason, file} -> {:error, {:workspace_archive_failed, reason, file}, ""}
+          {:error, reason} -> {:error, {:workspace_archive_failed, reason}, ""}
+        end
+    end
+  end
+
+  defp archive_root do
+    settings = Config.settings!()
+    settings.workspace.archive_root || Path.join(settings.workspace.root, ".archive")
+  end
+
+  defp unique_archive_path(archive_root, leaf) do
+    timestamp =
+      DateTime.utc_now()
+      |> Calendar.strftime("%Y%m%dT%H%M%SZ")
+
+    Path.join(archive_root, "#{leaf}-#{timestamp}-#{System.unique_integer([:positive])}")
   end
 
   defp maybe_run_before_remove_hook(workspace, nil) do
