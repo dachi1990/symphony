@@ -8,6 +8,23 @@ defmodule SymphonyElixir.Workspace do
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
   @ready_marker ".symphony-workspace-ready"
+  @archive_excluded_dir_names ~w(
+    node_modules
+    .next
+    .turbo
+    dist
+    build
+    .venv
+    coverage
+    .cache
+    .pytest_cache
+    .mypy_cache
+    .ruff_cache
+    __pycache__
+    _build
+    deps
+  )
+  @archive_excluded_file_names ~w(tsconfig.tsbuildinfo)
 
   @type worker_host :: String.t() | nil
 
@@ -95,6 +112,7 @@ defmodule SymphonyElixir.Workspace do
         case validate_workspace_path(workspace, nil) do
           :ok ->
             maybe_run_before_remove_hook(workspace, nil)
+            prune_generated_archive_artifacts(workspace, nil)
             archive_workspace(workspace, nil)
 
           {:error, reason} ->
@@ -108,6 +126,7 @@ defmodule SymphonyElixir.Workspace do
 
   def remove(workspace, worker_host) when is_binary(worker_host) do
     maybe_run_before_remove_hook(workspace, worker_host)
+    prune_generated_archive_artifacts(workspace, worker_host)
 
     script =
       [
@@ -284,6 +303,102 @@ defmodule SymphonyElixir.Workspace do
 
     run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms)
     :ok
+  end
+
+  defp prune_generated_archive_artifacts(workspace, nil) do
+    {removed_dirs, removed_files} = prune_local_archive_artifacts(workspace)
+
+    if removed_dirs + removed_files > 0 do
+      Logger.info("Pruned generated workspace artifacts before archive workspace=#{workspace} removed_dirs=#{removed_dirs} removed_files=#{removed_files}")
+    end
+
+    :ok
+  end
+
+  defp prune_generated_archive_artifacts(workspace, worker_host) when is_binary(worker_host) do
+    case run_remote_command(worker_host, remote_archive_prune_script(workspace), Config.settings!().hooks.timeout_ms) do
+      {:ok, {_output, 0}} ->
+        :ok
+
+      {:ok, {output, status}} ->
+        Logger.warning("Remote archive artifact pruning failed workspace=#{workspace} worker_host=#{worker_host} status=#{status} output=#{inspect(sanitize_hook_output_for_log(output))}")
+
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Remote archive artifact pruning errored workspace=#{workspace} worker_host=#{worker_host} reason=#{inspect(reason)}")
+
+        :ok
+    end
+  end
+
+  defp prune_local_archive_artifacts(workspace) do
+    case File.ls(workspace) do
+      {:ok, entries} ->
+        Enum.reduce(entries, {0, 0}, &prune_local_archive_entry(workspace, &1, &2))
+
+      _ ->
+        {0, 0}
+    end
+  end
+
+  defp prune_local_archive_entry(workspace, entry, counts) do
+    path = Path.join(workspace, entry)
+
+    case File.lstat(path) do
+      {:ok, stat} -> prune_local_archive_path(path, entry, stat, counts)
+      _ -> counts
+    end
+  end
+
+  defp prune_local_archive_path(_path, ".git", %File.Stat{type: :directory}, counts), do: counts
+
+  defp prune_local_archive_path(path, entry, %File.Stat{type: :directory}, {dir_count, file_count}) do
+    if entry in @archive_excluded_dir_names do
+      File.rm_rf(path)
+      {dir_count + 1, file_count}
+    else
+      add_prune_counts({dir_count, file_count}, prune_local_archive_artifacts(path))
+    end
+  end
+
+  defp prune_local_archive_path(path, entry, %File.Stat{type: :regular}, {dir_count, file_count}) do
+    if generated_archive_file?(entry) do
+      File.rm(path)
+      {dir_count, file_count + 1}
+    else
+      {dir_count, file_count}
+    end
+  end
+
+  defp prune_local_archive_path(_path, _entry, _stat, counts), do: counts
+
+  defp add_prune_counts({left_dirs, left_files}, {right_dirs, right_files}) do
+    {left_dirs + right_dirs, left_files + right_files}
+  end
+
+  defp generated_archive_file?(name) do
+    name in @archive_excluded_file_names or String.ends_with?(name, ".tsbuildinfo")
+  end
+
+  defp remote_archive_prune_script(workspace) do
+    dir_expr =
+      @archive_excluded_dir_names
+      |> Enum.map_join(" -o ", &"-name #{shell_escape(&1)}")
+
+    file_expr =
+      (["*.tsbuildinfo"] ++ @archive_excluded_file_names)
+      |> Enum.uniq()
+      |> Enum.map_join(" -o ", &"-name #{shell_escape(&1)}")
+
+    [
+      remote_shell_assign("workspace", workspace),
+      "if [ -d \"$workspace\" ]; then",
+      "  find \"$workspace\" -type d \\( #{dir_expr} \\) -prune -exec rm -rf {} +",
+      "  find \"$workspace\" -type f \\( #{file_expr} \\) -exec rm -f {} +",
+      "fi"
+    ]
+    |> Enum.join("\n")
   end
 
   defp archive_workspace(workspace, nil) do

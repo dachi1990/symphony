@@ -289,6 +289,56 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace archive preserves evidence while pruning generated artifacts" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-workspace-prune-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      target_workspace = Path.join(workspace_root, "S_PRUNE")
+
+      File.mkdir_p!(target_workspace)
+      File.mkdir_p!(Path.join(target_workspace, ".git"))
+      File.mkdir_p!(Path.join(target_workspace, "docs"))
+      File.mkdir_p!(Path.join(target_workspace, "logs"))
+      File.mkdir_p!(Path.join(target_workspace, "patches"))
+      File.write!(Path.join(target_workspace, "README.md"), "source evidence")
+      File.write!(Path.join(target_workspace, "Armada Workpad.md"), "workpad evidence")
+      File.write!(Path.join([target_workspace, ".git", "HEAD"]), "ref: refs/heads/codex/S-PRUNE\n")
+      File.write!(Path.join([target_workspace, "docs", "decision.md"]), "docs evidence")
+      File.write!(Path.join([target_workspace, "logs", "agent.log"]), "log evidence")
+      File.write!(Path.join([target_workspace, "patches", "change.patch"]), "patch evidence")
+      File.write!(Path.join(target_workspace, "app.tsbuildinfo"), "compiled metadata")
+
+      for dir <- ~w(node_modules .next .turbo dist build .venv coverage .cache .pytest_cache .mypy_cache .ruff_cache __pycache__ _build deps) do
+        generated_dir = Path.join(target_workspace, dir)
+        File.mkdir_p!(generated_dir)
+        File.write!(Path.join(generated_dir, "artifact.txt"), "generated")
+      end
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      assert :ok = Workspace.remove_issue_workspaces("S_PRUNE")
+      assert [archived_workspace] = Path.wildcard(Path.join([workspace_root, ".archive", "S_PRUNE-*"]))
+
+      assert File.read!(Path.join(archived_workspace, "README.md")) == "source evidence"
+      assert File.read!(Path.join(archived_workspace, "Armada Workpad.md")) == "workpad evidence"
+      assert File.read!(Path.join([archived_workspace, ".git", "HEAD"])) =~ "codex/S-PRUNE"
+      assert File.read!(Path.join([archived_workspace, "docs", "decision.md"])) == "docs evidence"
+      assert File.read!(Path.join([archived_workspace, "logs", "agent.log"])) == "log evidence"
+      assert File.read!(Path.join([archived_workspace, "patches", "change.patch"])) == "patch evidence"
+      refute File.exists?(Path.join(archived_workspace, "app.tsbuildinfo"))
+
+      for dir <- ~w(node_modules .next .turbo dist build .venv coverage .cache .pytest_cache .mypy_cache .ruff_cache __pycache__ _build deps) do
+        refute File.exists?(Path.join(archived_workspace, dir))
+      end
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace cleanup handles missing workspace root" do
     missing_root =
       Path.join(
